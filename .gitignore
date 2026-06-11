@@ -1,0 +1,23 @@
+Python virtual environments & build artifacts
+
+venv/
+.venv/
+pycache/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+Local logs & persistent testing volumes
+
+traefik_logs/
+npmgraf_data/
+geolite/
+influxdbv2/
+grafana-storage/
+
+Local sensitive configuration secrets
+
+.env
+npmgraf_data/influxdb-token.txt
+npmgraf_data/abuseipdb-key.txt
