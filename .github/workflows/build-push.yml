@@ -70,12 +70,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-```
-
-### Apply the fix and push:
-Once you save the file, update your Git tracking repository and push it back up:
-
-```bash
-git add .github/workflows/build-push.yml
-git commit -m "fix: correct step reference syntax in build workflow"
-git push origin main
