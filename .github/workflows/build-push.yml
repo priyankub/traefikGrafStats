@@ -25,7 +25,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Set up QEMU for multi-architecture emulation (essential for building arm64 on x86_64 runners)
+      # Set up QEMU for multi-architecture emulation
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
@@ -65,7 +65,17 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ id.meta.outputs.tags }}
-          labels: ${{ id.meta.outputs.labels }}
+          # FIXED: Swapped 'id' context with 'steps' context below
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+```
+
+### Apply the fix and push:
+Once you save the file, update your Git tracking repository and push it back up:
+
+```bash
+git add .github/workflows/build-push.yml
+git commit -m "fix: correct step reference syntax in build workflow"
+git push origin main
