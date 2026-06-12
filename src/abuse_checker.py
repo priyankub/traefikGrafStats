@@ -1,8 +1,9 @@
-"""AbuseIPDB checker with SQLite WAL-mode cache (thread-safe)."""
+"""AbuseIPDB checker with SQLite WAL-mode cache (thread-safe, Jitter, Dynamic TTL, Stale-While-Revalidate)."""
 
 import json
 import logging
 import os
+import random
 import sqlite3
 import threading
 import time
@@ -29,6 +30,7 @@ class AbuseChecker:
         self._api_key = api_key
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.Lock()
+        self._pending_refreshes = set()  # Tracks active background API requests to prevent duplicates
         if not api_key:
             logger.info("AbuseIPDB disabled (no API key)")
             return
@@ -67,34 +69,60 @@ class AbuseChecker:
             logger.warning("JSON cache migration failed: %s", e)
 
     def _cleanup_expired(self):
-        cutoff = time.time() - CACHE_TTL_HOURS * 3600
+        """Clean up expired entries. Since dynamic scaling supports up to 14 days,
+        we change the global purge cutoff to 14 days (336h) to prevent deleting active long-lived caches."""
+        max_ttl_hours = 336
+        cutoff = time.time() - max_ttl_hours * 3600
         if self._conn:
             self._conn.execute("DELETE FROM abuse_cache WHERE fetched_at < ?", (cutoff,))
             self._conn.commit()
-            logger.info("Cleaned up expired abuse cache entries (older than %dh)", CACHE_TTL_HOURS)
+            logger.info("Cleaned up expired abuse cache entries (older than %dh)", max_ttl_hours)
 
     @property
     def enabled(self) -> bool:
         return self._api_key is not None
 
     def check(self, ip: str) -> tuple[int, int]:
-        """Returns (confidence_score, total_reports). (0, 0) if unavailable."""
+        """Returns (confidence_score, total_reports). (0, 0) if unavailable.
+        Employs dynamic TTL thresholds, cache jitter, and stale-while-revalidate background fetches."""
         if not self._api_key or not self._conn:
             return 0, 0
 
-        cutoff = time.time() - CACHE_TTL_HOURS * 3600
-
         with self._lock:
             row = self._conn.execute(
-                "SELECT confidence_score, total_reports FROM abuse_cache WHERE ip = ? AND fetched_at >= ?",
-                (ip, cutoff),
+                "SELECT confidence_score, total_reports, fetched_at FROM abuse_cache WHERE ip = ?",
+                (ip,),
             ).fetchone()
-        if row:
-            logger.debug("AbuseIPDB cache HIT for %s", ip)
-            return row[0], row[1]
 
-        # Cache miss - fetch from API (outside lock to avoid blocking other threads)
-        logger.debug("AbuseIPDB cache MISS for %s", ip)
+        if row:
+            confidence_score, total_reports, fetched_at = row
+
+            # --- OPTIMIZATION 1: DYNAMIC TTL SCALING ---
+            # Highly malicious IPs stay malicious. Cache them longer to conserve our API key budget.
+            if confidence_score >= 90:
+                ttl_hours = 336  # Keep critical offenders cached for 14 days
+            elif confidence_score >= 50:
+                ttl_hours = 168  # Keep suspicious IPs cached for 7 days
+            else:
+                ttl_hours = CACHE_TTL_HOURS  # Default (48 hours) for clean or low-score IPs
+
+            is_expired = (time.time() - fetched_at) >= (ttl_hours * 3600)
+
+            if is_expired:
+                # --- OPTIMIZATION 2: STALE-WHILE-REVALIDATE ---
+                # Entry is stale. Instantly return historical data to the dashboard,
+                # then spawn a background thread to quietly refresh the API cache.
+                logger.debug("AbuseIPDB cache entry for %s is stale (expired after %dh). Triggering lazy revalidation.", ip, ttl_hours)
+                threading.Thread(target=self._refresh_api_async, args=(ip,), daemon=True).start()
+            else:
+                logger.debug("AbuseIPDB cache HIT for %s (TTL: %dh, valid for %d more hours)",
+                             ip, ttl_hours, int((ttl_hours * 3600 - (time.time() - fetched_at)) / 3600))
+
+            return confidence_score, total_reports
+
+        # Cold Cache Miss: We have no stale data to fall back on. 
+        # Perform a standard synchronous lookup to establish the baseline entry.
+        logger.debug("AbuseIPDB cache cold MISS for %s", ip)
         try:
             resp = requests.get(
                 "https://api.abuseipdb.com/api/v2/check",
@@ -106,16 +134,59 @@ class AbuseChecker:
             api_data = resp.json().get("data", {})
             cs = api_data.get("abuseConfidenceScore", 0)
             tr = api_data.get("totalReports", 0)
+
+            # --- OPTIMIZATION 3: CACHE JITTER ---
+            # Shift the timestamp by a random interval (+/- 6 hours) to prevent clustered expiry storms.
+            jitter_seconds = random.randint(-6 * 3600, 6 * 3600)
+            fetched_at = time.time() + jitter_seconds
+
             with self._lock:
                 self._conn.execute(
                     "INSERT OR REPLACE INTO abuse_cache (ip, confidence_score, total_reports, data_json, fetched_at) VALUES (?, ?, ?, ?, ?)",
-                    (ip, cs, tr, json.dumps(api_data), time.time()),
+                    (ip, cs, tr, json.dumps(api_data), fetched_at),
                 )
                 self._conn.commit()
             return cs, tr
         except Exception as e:
             logger.warning("AbuseIPDB API error for %s: %s", ip, e)
             return 0, 0
+
+    def _refresh_api_async(self, ip: str):
+        """Worker executing asynchronous API checks in the background to prevent lock-blocking."""
+        with self._lock:
+            if ip in self._pending_refreshes:
+                return  # Prevent duplicating ongoing revalidations for the same IP
+            self._pending_refreshes.add(ip)
+
+        try:
+            logger.debug("Asynchronously revalidating IP %s in background thread...", ip)
+            resp = requests.get(
+                "https://api.abuseipdb.com/api/v2/check",
+                params={"ipAddress": ip, "maxAgeInDays": "90"},
+                headers={"Accept": "application/json", "Key": self._api_key},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            api_data = resp.json().get("data", {})
+            cs = api_data.get("abuseConfidenceScore", 0)
+            tr = api_data.get("totalReports", 0)
+
+            # Apply cache jitter to background refreshes too
+            jitter_seconds = random.randint(-6 * 3600, 6 * 3600)
+            fetched_at = time.time() + jitter_seconds
+
+            with self._lock:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO abuse_cache (ip, confidence_score, total_reports, data_json, fetched_at) VALUES (?, ?, ?, ?, ?)",
+                    (ip, cs, tr, json.dumps(api_data), fetched_at),
+                )
+                self._conn.commit()
+            logger.debug("Asynchronous revalidation complete for %s (Score: %d%%)", ip, cs)
+        except Exception as e:
+            logger.warning("Async background AbuseIPDB API update failed for %s: %s", ip, e)
+        finally:
+            with self._lock:
+                self._pending_refreshes.discard(ip)
 
     def close(self):
         if self._conn:
