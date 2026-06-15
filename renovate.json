@@ -11,12 +11,18 @@
     }
   ],
   "pip_requirements": {
-    "fileMatch": ["(^|/)requirements\\.txt$"]
+    "managerFilePatterns": [
+      "/(^|/)requirements\\.txt$/"
+    ]
   },
   "github-actions": {
-    "fileMatch": ["(^|/)\\.github/workflows/.+\\.yml$"]
+    "managerFilePatterns": [
+      "/(^|/)\\.github/workflows/.+\\.yml$/"
+    ]
   },
   "dockerfile": {
-    "fileMatch": ["(^|/)Dockerfile$"]
+    "managerFilePatterns": [
+      "/(^|/)Dockerfile$/"
+    ]
   }
 }
