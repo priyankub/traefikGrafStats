@@ -1,51 +1,86 @@
-traefikGrafStats 📈
+# traefikGrafStats 📈
 
-A platform-agnostic, lightweight, and highly performant parser that tails Traefik access logs in JSON format, resolves client IP geolocation coordinates, queries AbuseIPDB scores, and pushes real-time analytical traffic metrics straight into an InfluxDB v2 database.
+`traefikGrafStats` is a platform-agnostic, high-performance log-tailing service designed specifically for **Traefik access logs in JSON format**.
 
-This project is a complete architectural rewrite of the exceptional npmGrafStats utility, swapping out Nginx regex line parsing for native, high-speed Traefik JSON log streaming.
+The application monitors your Traefik logs in real-time, extracts geo-coordinates via MaxMind GeoLite2, checks IP safety ratings through AbuseIPDB with an advanced resilient circuit-breaker cache, and pushes structured time-series metrics directly into **InfluxDB v2** for display on beautiful Grafana map dashboards.
 
-🚀 Key Features
+This project is a complete architectural rewrite and drop-in modernization of the excellent [smilebasti/npmGrafStats](https://github.com/smilebasti/npmGrafStats) project, replacing Nginx regex parsing with native, high-speed JSON stream decoding.
 
-Native Traefik JSON Log Parsing: Direct key extraction out of structured JSON files—fast, highly reliable, and immune to regex formatting breakages.
+## 🚀 Key Features
 
-Platform-Agnostic Build: Multi-arch Docker images built for linux/amd64 and linux/arm64 (fully optimized for the Raspberry Pi 5).
+* **High-Speed JSON Parser:** Native, structured deserialization of Traefik logs. Zero regex performance hits or parsing breakage due to upstream log format shifts.
 
-Direct Geolocation Lookup: Integrates with Maxmind's GeoLite2 databases to find the city, state, country, and ASN of incoming traffic.
+* **Resilient Threat Cache (Quota Guard):** Built specifically for the AbuseIPDB Free Tier (1,000 requests/day):
 
-AbuseIPDB Integration: Cross-references incoming IPs against malicious reporting API registries.
+  * **Circuit Breaker:** Instantly stops making outbound HTTP requests when a `429 Too Many Requests` status is hit, resuming automatically only after the limit resets.
 
-Seamless InfluxDB v2 & Grafana Compatibility: Preserves the metric schemas and tags from npmGrafStats, ensuring absolute drop-in compatibility with your existing Grafana dashboards.
+  * **Stale-While-Revalidate (SWR):** Instantly returns cached IP data to InfluxDB to prevent log processing lag, updating stale records silently on background threads.
 
-🛠️ Configuration Requirements
+  * **Dynamic TTL Scaling:** Suspicious and highly malicious IPs (Confidence Score $\ge$ 50%) are automatically cached for 7 to 14 days to conserve API requests.
 
-1. Configure Traefik Access Logs (JSON Format)
+  * **Jitter:** Introduces a random variance to entry timestamps to prevent massive waves of simultaneous database expirations.
 
-To feed structured data to the parser, you must configure Traefik to output its access logs in JSON. Add these commands (or equivalent file provider variables) to your Traefik deployment:
+* **Platform-Agnostic Build:** Full multi-architecture support (`linux/amd64`, `linux/arm64`) optimized out-of-the-box for Raspberry Pi 5.
 
-# In your traefik service commands:
+* **Internal / External Routing:** Intelligently separates metrics for external web requests, internal infrastructure traffic, and monitoring probes.
+
+## ⚙️ Configuration Reference (Environment Variables)
+
+The application is configured primarily through environment variables passed to the Docker container (manually or via a .env file).
+
+### **Application Environment Variables**
+
+| Variable Name | Default Value | Description |
+| :---- | :---- | :---- |
+| INFLUX\_HOST | http://localhost:8086 | Full URL to your InfluxDB v2 instance. |
+| INFLUX\_TOKEN | *None (Required)* | InfluxDB API All-Access token. Can also be loaded from /data/influxdb-token.txt. |
+| INFLUX\_ORG | npmgrafstats | The organization name set up in your InfluxDB instance. |
+| INFLUX\_BUCKET | npmgrafstats | Target bucket name. Retained to match historical npmGrafStats dashboard layouts. |
+| ABUSEIP\_KEY | *None* | Optional. Your AbuseIPDB API key. Can also be loaded from /data/abuseipdb-key.txt. |
+| INTERNAL\_LOGS | false | Set to true to log local network requests (internal IPs) to InfluxDB. |
+| MONITORING\_LOGS | false | Set to true to log monitoring and health-check IPs to InfluxDB. |
+| EXTERNAL\_IP | *None* | Optional. Explicitly sets your own external WAN IP to distinguish loopback proxy traffic. Can also be read from /data/external-ip.txt. |
+| LOG\_LEVEL | INFO | Standard application logging verbosity (DEBUG, INFO, WARNING, ERROR). |
+| VERBOSE\_LOGGING | FALSE | Set to TRUE to output every parsed log entry details directly to standard output. |
+
+### **Docker Volume Mounts**
+
+| Container Directory | Host Target Mount | Purpose |
+| :---- | :---- | :---- |
+| /logs | /home/pranks/docker/traefik/log | Mounted path containing your Traefik JSON access\*.log files to tail. |
+| /geolite | ./geolite | Shared with geoipupdate containing GeoLite2-City.mmdb and GeoLite2-ASN.mmdb. |
+| /data | ./npmgraf\_data | Persistent storage for SQLite cache (abuseip\_cache.db) and manual text configuration keys. |
+
+## 🛠️ Infrastructure Setup
+
+### 1. Configure Traefik Access Logs (JSON)
+
+For this service to parse logs, Traefik must write access logs in the **JSON** format. In your Traefik static configuration file (`traefik.yml` or CLI labels), ensure the following is configured:
+
+```
+# CLI Flags:
 - "--accesslog=true"
 - "--accesslog.filepath=/logs/access.log"
 - "--accesslog.format=json"
 
+```
 
-2. Prepare Directories on your Host Machine
+### 2. Set Directory Permissions (Critical)
 
-The application requires direct access to your Traefik log directory, your InfluxDB database state, and a folder to store Maxmind's GeoIP DB cache files:
+Because the container drops root privileges to run as a secure non-root `appuser` (UID 1000), you must ensure your local data directory is writable by this user ID:
 
-mkdir -p ./traefik_logs
-mkdir -p ./geolite
-mkdir -p ./npmgraf_data
+```
+sudo chown -R 1000:1000 /home/pranks/docker/npmplus/npmgraf
 
+```
 
-Ensure the container has permission to write to your npmgraf_data folder (needed to initialize the SQLite API cache database):
+## 🐳 Integration Deployment (`docker-compose.yml`)
 
-sudo chown -R 1000:1000 ./npmgraf_data
+The complete production-ready stack integrates InfluxDB, Grafana, `geoipupdate` (automated MaxMind sync), and `traefikGrafStats`.
 
+This stack exposes no database ports directly to the host machine. Instead, Traefik dynamically routes your domain over a secure `reverse_proxy` network:
 
-🐳 Integration Deployment (docker-compose.yml)
-
-Here is a secure production deployment file. Note that no host ports are exposed directly; instead, we expose the InfluxDB management console strictly over the internal secure reverse_proxy network using Traefik labels:
-
+```
 services:
   influxdb:
     cpu_shares: 90
@@ -58,19 +93,20 @@ services:
       - DOCKER_INFLUXDB_INIT_BUCKET=npmgrafstats
       - DOCKER_INFLUXDB_INIT_MODE=setup
       - DOCKER_INFLUXDB_INIT_ORG=npmgrafstats
-      - DOCKER_INFLUXDB_INIT_PASSWORD=hujugotarehuagoru
-      - DOCKER_INFLUXDB_INIT_USERNAME=dhinadhindha
+      - DOCKER_INFLUXDB_INIT_PASSWORD=your_secure_influx_password
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
     hostname: influxdb
     image: influxdb:2.7-alpine
     restart: unless-stopped
     volumes:
-      - ./influxdbv2/data:/var/lib/influxdb2
-      - ./influxdbv2/etc:/etc/influxdb2
+      - /home/pranks/docker/npmplus/influxdbv2/data:/var/lib/influxdb2
+      - /home/pranks/docker/npmplus/influxdbv2/etc:/etc/influxdb2
     networks:
       - reverse_proxy
+    privileged: false
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.rpiinflux.rule=Host(`rpiinflux.local.baruah.net`)"
+      - "traefik.http.routers.rpiinflux.rule=Host(`rpiinflux.FQDN`)"
       - "traefik.http.routers.rpiinflux.middlewares=https-redirect@file, default-headers@file"      
       - "traefik.http.routers.rpiinflux.entrypoints=https"
       - "traefik.http.routers.rpiinflux.tls=true"
@@ -79,60 +115,96 @@ services:
 
   traefikgraf:
     container_name: traefikgraf
-    image: ghcr.io/yourusername/traefikgrafstats:latest
+    image: ghcr.io/priyankub/traefikgrafstats:latest
     restart: unless-stopped
     environment:
-      - ABUSEIP_KEY=2a22ae411e4e5c7557f98b8899a2639aa747f6536e1e52618421353f2ecc4df4b598b558315ddd87
+      - ABUSEIP_KEY=${ABUSEIP_KEY}
       - INFLUX_HOST=http://influxdb:8086
       - INFLUX_ORG=npmgrafstats
       - INFLUX_BUCKET=npmgrafstats
-      - INFLUX_TOKEN=your-token-goes-here
+      - INFLUX_TOKEN=${INFLUX_TOKEN}
       - INTERNAL_LOGS=true
       - MONITORING_LOGS=true
+      - LOG_LEVEL=INFO
+      - VERBOSE_LOGGING=FALSE
     hostname: traefikgraf
     volumes:
       - type: bind
-        source: /home/pranks/docker/traefik/log # Traefik access.log path
+        source: /home/pranks/docker/traefik/log
         target: /logs
-      - ./geolite:/geolite
-      - ./npmgraf_data:/data
+      - type: bind
+        source: /home/pranks/docker/npmplus/npmplus/goaccess/geoip
+        target: /geolite
+      - type: bind
+        source: /home/pranks/docker/npmplus/npmgraf
+        target: /data
     networks:
       - reverse_proxy
+    privileged: false
     depends_on:
       - influxdb
 
   geoipupdate:
     cpu_shares: 90
     container_name: geoipupdate
-    environment:
-      - GEOIPUPDATE_ACCOUNT_ID=your_maxmind_id
-      - GEOIPUPDATE_EDITION_IDS=GeoLite2-Country GeoLite2-City GeoLite2-ASN
-      - GEOIPUPDATE_FREQUENCY=24
-      - GEOIPUPDATE_LICENSE_KEY=your_maxmind_key
-      - TZ=America/Chicago
-    hostname: geoipupdate
-    image: ghcr.io/maxmind/geoipupdate:latest
-    restart: always
-    volumes:
-      - ./geolite:/usr/share/GeoIP
-    networks:
-      - reverse_proxy
+    deploy:
+      resources:
+        limits:
+          memory: 4049M
+        environment:
+          - GEOIPUPDATE_ACCOUNT_ID=${GEOIPUPDATE_ACCOUNT_ID}
+          - GEOIPUPDATE_EDITION_IDS=GeoLite2-Country GeoLite2-City GeoLite2-ASN
+          - GEOIPUPDATE_FREQUENCY=24
+          - GEOIPUPDATE_LICENSE_KEY=${GEOIPUPDATE_LICENSE_KEY}
+          - TZ=America/Chicago
+        hostname: geoipupdate
+        image: ghcr.io/maxmind/geoipupdate:latest
+        restart: always
+        volumes:
+          - type: bind
+            source: /home/pranks/docker/npmplus/npmplus/goaccess/geoip
+            target: /usr/share/GeoIP
+        networks:
+          - reverse_proxy
+        privileged: false
 
 networks:
   reverse_proxy:
     external: true
 
+```
 
-📊 Dashboards and Visualizations
+### Local environment Configuration (`.env`)
 
-Since traefikGrafStats perfectly mirrors the tag and measurement schemas used in npmGrafStats, you can import the preconfigured community dashboards directly into your Grafana instance.
+Place your keys and credentials in a local `.env` file right next to your `docker-compose.yml`. This file is ignored by Git automatically:
 
-Map Dashboard (with Filter): Import original template maps from your repository or using standard InfluxDBv2 panels pointing to your measurement queries.
+```
+# InfluxDB Auth
+INFLUX_TOKEN=INFLUX_TOKEN_KEY
 
-⚖️ License & Attribution
+# Maxmind GeoIP Configuration
+GEOIPUPDATE_ACCOUNT_ID=MAXMIND_ID
+GEOIPUPDATE_LICENSE_KEY=MAXMIND_KEY
 
-This project is licensed under the GNU General Public License v3 (GPL v3).
+# Threat Identification
+ABUSEIP_KEY=ABUSEIP_KEY
 
-Credits & Attribution
+```
 
-This project is an independent derivative of smilebasti/npmGrafStats. Huge thank you to the original contributors for building the foundation of this monitoring pipeline.
+## 📊 Dashboard Import
+
+Because this application preserves the precise measurement structures, tag names, and coordinates mapped by the original project, existing dashboards are immediately compatible.
+
+To add the map to Grafana:
+
+1. Ensure Grafana is connected to your InfluxDB datasource via **Flux query language** using your organization and bucket settings.
+
+2. Import your dashboard JSON files using InfluxDBv2 panels targeting `ReverseProxyConnections` and `Redirections` measurements.
+
+## ⚖️ License & Attribution
+
+This program is free software: you can redistribute it and/or modify it under the terms of the **GNU General Public License v3** as published by the Free Software Foundation.
+
+### Attribution
+
+* Base project and inspiration: [smilebasti/npmGrafStats](https://github.com/smilebasti/npmGrafStats).
