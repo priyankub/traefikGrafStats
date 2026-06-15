@@ -3,10 +3,25 @@
   "extends": [
     "config:recommended"
   ],
+  "dependencyDashboard": true,
+  "rebaseWhen": "behind-base-branch",
+  "commitMessagePrefix": "chore(deps): ⬆️",
+  "commitMessageTopic": "{{depName}}",
+  
   "packageRules": [
     {
+      "description": "Safe automated pipeline for non-major additions (patches/minors)",
       "matchUpdateTypes": ["minor", "patch"],
       "groupName": "non-major dependencies",
+      "minimumReleaseAge": "3 days",
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+      "internalChecksFilter": "strict"
+    },
+    {
+      "description": "Safety gate for major versions - always require human verification",
+      "matchUpdateTypes": ["major"],
       "automerge": false
     }
   ],
