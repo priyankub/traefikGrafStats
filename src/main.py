@@ -86,19 +86,36 @@ def main():
                         abuse_enabled=abuse.enabled,
                     )
             else:
-                geo_result = geo.lookup(entry.outside_ip)
-                abuse_scores = abuse.check(entry.outside_ip)
-                
-                # Routes to "Redirections" or "ReverseProxyConnections" measurements
-                measurement = "Redirections" if is_redirect else "ReverseProxyConnections"
-                influx.write_external(
-                    measurement, entry.outside_ip, entry.domain,
-                    entry.length, entry.target_ip, entry.timestamp,
-                    entry.status_code, ua_info, geo_result, abuse_scores,
-                    abuse_enabled=abuse.enabled,
-                )
-            with _stats_lock:
-                _stats["written"] += 1
+                # --- OPTIMIZATION: Honor REDIRECTION_LOGS configuration ---
+                redir_cfg = cfg.get("redirection_logs", "FALSE")
+                should_log = False
+                measurement = "ReverseProxyConnections"
+
+                if is_redirect:
+                    if redir_cfg in ("TRUE", "ONLY"):
+                        should_log = True
+                        measurement = "Redirections"
+                else:
+                    if redir_cfg in ("TRUE", "FALSE"):
+                        should_log = True
+                        measurement = "ReverseProxyConnections"
+
+                if should_log:
+                    geo_result = geo.lookup(entry.outside_ip)
+                    abuse_scores = abuse.check(entry.outside_ip)
+                    
+                    influx.write_external(
+                        measurement, entry.outside_ip, entry.domain,
+                        entry.length, entry.target_ip, entry.timestamp,
+                        entry.status_code, ua_info, geo_result, abuse_scores,
+                        abuse_enabled=abuse.enabled,
+                    )
+                    with _stats_lock:
+                        _stats["written"] += 1
+                else:
+                    logger.debug("Skipping log writing due to redirection_logs configuration: domain=%s, redirect=%s", 
+                                 entry.domain, is_redirect)
+
         except Exception as e:
             logger.error("InfluxDB write FAILED for %s %s -> %s: %s", entry.outside_ip, entry.domain, entry.target_ip, e)
             with _stats_lock:
