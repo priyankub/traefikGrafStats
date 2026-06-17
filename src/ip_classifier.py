@@ -26,17 +26,6 @@ def _parse_networks(filepath: str) -> list[ipaddress.IPv4Network | ipaddress.IPv
     return networks
 
 
-# Private networks for internal IP detection
-_PRIVATE_NETS = [
-    ipaddress.ip_network("10.0.0.0/8"),
-    ipaddress.ip_network("172.16.0.0/12"),
-    ipaddress.ip_network("192.168.0.0/16"),
-    ipaddress.ip_network("::1/128"),
-    ipaddress.ip_network("fc00::/7"),
-    ipaddress.ip_network("fe80::/10"),
-]
-
-
 class IPClassifier:
     def __init__(self, external_ip: str | None, has_monitoring_file: bool):
         self._external_ip = external_ip
@@ -50,7 +39,7 @@ class IPClassifier:
             return "external"
 
         # Check internal
-        if any(addr in net for net in _PRIVATE_NETS):
+        if addr.is_loopback or addr.is_private:
             return "internal"
         if self._external_ip and ip_str == self._external_ip:
             return "internal"
