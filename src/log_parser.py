@@ -1,4 +1,4 @@
-"""Parses Traefik access.log records formatted as JSON.
+"""Parses Traefik access.log records formatted as JSON with secure Right-to-Left proxy chain traversal.
 
 Traefik standard JSON structure mappings:
   - Outside client IP: 'ClientHost' (or falls back to parsing 'ClientAddr')
@@ -12,6 +12,7 @@ Traefik standard JSON structure mappings:
 
 import json
 import logging
+import ipaddress
 
 logger = logging.getLogger(__name__)
 
@@ -38,9 +39,39 @@ def parse_traefik_json_line(line: str) -> TraefikLogEntry | None:
         return None
 
     # 1. Extract Client IP
-    # 'ClientHost' contains only the client IP, whereas 'ClientAddr' has IP:Port.
     outside_ip = data.get("ClientHost")
-    if not outside_ip:
+
+    if outside_ip:
+        if "," in outside_ip:
+            # Proxy chain detected (e.g., "ClientIP, EdgeProxy, InternalProxy")
+            ips = [ip.strip() for ip in outside_ip.split(",")]
+            
+            # Walk backwards from right to left to strip trusted infrastructure layers
+            resolved_public_ip = None
+            for ip in reversed(ips):
+                try:
+                    addr = ipaddress.ip_address(ip)
+                    # Skip loopback and private networks (RFC1918 / Unique Local)
+                    if addr.is_loopback or addr.is_private:
+                        continue
+                    resolved_public_ip = ip
+                    break
+                except ValueError:
+                    # Handle malformed string values safely
+                    continue
+            
+            if resolved_public_ip:
+                outside_ip = resolved_public_ip
+            else:
+                # Fallback: if the entire chain is internal, pick the leftmost client entry
+                outside_ip = ips[0]
+                logger.warning(
+                    "Traefik proxy chain resolved to entirely local IPs: %s. "
+                    "Verify your Traefik trustedIPs configuration matches your upstream reverse proxy.",
+                    outside_ip
+                )
+    else:
+        # Fallback logic if ClientHost is entirely missing
         client_addr = data.get("ClientAddr", "")
         if client_addr:
             outside_ip = client_addr.rsplit(":", 1)[0].replace("[", "").replace("]", "")
