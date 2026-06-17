@@ -27,7 +27,7 @@
   ],
   "pip_requirements": {
     "managerFilePatterns": [
-      "/(^|/)requirements\\.txt$/"
+      "/(^|/)requirements.*\\.txt$/"
     ]
   },
   "github-actions": {
