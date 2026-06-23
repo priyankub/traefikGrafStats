@@ -7,7 +7,8 @@
   "rebaseWhen": "behind-base-branch",
   "commitMessagePrefix": "chore(deps): ⬆️",
   "commitMessageTopic": "{{depName}}",
-  
+  "prHourlyLimit": 0,
+  "prConcurrentLimit": 0,
   "packageRules": [
     {
       "description": "Safe automated pipeline for non-major additions (patches/minors)",
@@ -23,6 +24,12 @@
       "description": "Safety gate for major versions - always require human verification",
       "matchUpdateTypes": ["major"],
       "automerge": false
+    },
+    {
+      "matchPackageNames": ["*"],
+      "groupName": "TraefikGrafStats Stack Dependencies",
+      "groupSlug": "traefik-graf-stats-deps",
+      "description": "Consolidate Python collection layers, core container base layers, and GitHub Actions CI pipelines for traefikGrafStats into a unified tracking branch."
     }
   ],
   "pip_requirements": {
