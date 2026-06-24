@@ -26,7 +26,7 @@
       "automerge": false
     },
     {
-      "matchPackageNames": ["*"],
+      "matchPackagePatterns": ["*"],
       "groupName": "TraefikGrafStats Stack Dependencies",
       "groupSlug": "traefik-graf-stats-deps",
       "description": "Consolidate Python collection layers, core container base layers, and GitHub Actions CI pipelines for traefikGrafStats into a unified tracking branch."
