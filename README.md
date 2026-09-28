@@ -14,6 +14,7 @@ This project is a complete architectural rewrite and drop-in modernization of th
   * **Circuit Breaker:** Instantly suspends outbound network queries when a 429 Too Many Requests is encountered, resuming automatically only after the limit resets.  
   * **Stale-While-Revalidate (SWR):** Instantly returns cached IP data to InfluxDB to avoid log stream bottlenecks, fetching fresh updates quietly on background threads.  
   * **Dynamic TTL Scaling:** Suspicious and highly malicious IPs (Confidence Score $\ge$ 50%) are automatically cached for 7 to 14 days to conserve API requests.
+  * **Neighbour Inference:** A new IP whose /24 (IPv6: /64) already has at least 3 cached neighbours scoring $\ge$ 25%, making up at least 75% of that subnet's cached entries, reuses their median score without calling the API. Distributed crawlers that rotate through hundreds of addresses in a few subnets no longer exhaust the daily quota. Inferred scores are not cached.
   * **Cache Jitter:** Adds random timestamp offsets to committed DB records to prevent coordinated expiration waves.  
 * **Platform-Agnostic Build:** Full multi-architecture support (linux/amd64, linux/arm64) optimized out-of-the-box for Raspberry Pi 5.  
 * **Traffic Routing Segmentation:** Intelligently isolates metrics for external web requests, internal infrastructure traffic, and monitoring checks.

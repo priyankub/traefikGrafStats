@@ -1,5 +1,6 @@
-"""AbuseIPDB checker with SQLite WAL-mode cache (Circuit Breaker, Jitter, Dynamic TTL, SWR)."""
+"""AbuseIPDB checker with SQLite WAL-mode cache (Circuit Breaker, Jitter, Dynamic TTL, SWR, Neighbour Inference)."""
 
+import ipaddress
 import json
 import logging
 import os
@@ -24,6 +25,25 @@ CREATE TABLE IF NOT EXISTS abuse_cache (
 )
 """
 
+# Neighbour inference: a cold miss whose subnet already holds enough high-scoring
+# cached IPs reuses their score instead of spending API quota. Distributed crawlers
+# rotate through hundreds of addresses in the same few /24s.
+NEIGHBOUR_PREFIX_V4 = 24
+NEIGHBOUR_PREFIX_V6 = 64
+NEIGHBOUR_MIN_HIGH = 3       # high-scoring neighbours needed before skipping a lookup
+NEIGHBOUR_HIGH_SCORE = 25    # score that counts a neighbour as high
+NEIGHBOUR_HIGH_RATIO = 0.75  # share of cached neighbours that must be high
+NEIGHBOUR_MAX_AGE_HOURS = 336
+
+
+def _subnet(ip: str) -> str | None:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    prefix = NEIGHBOUR_PREFIX_V4 if addr.version == 4 else NEIGHBOUR_PREFIX_V6
+    return str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+
 
 class AbuseChecker:
     def __init__(self, api_key: str | None):
@@ -31,6 +51,7 @@ class AbuseChecker:
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.Lock()
         self._pending_refreshes = set()  # Tracks active background API requests to prevent duplicates
+        self._inferred_nets = set()  # Subnets already logged as inferred, to log each once
         self._rate_limit_reset_time = 0.0     
         if not api_key:
             logger.info("AbuseIPDB disabled (no API key)")
@@ -44,7 +65,59 @@ class AbuseChecker:
         self._conn.execute(_CREATE_TABLE)
         self._conn.commit()
         self._migrate_json_cache()
+        self._migrate_net_column()
+        self._conn.commit()
         self._cleanup_expired()
+
+    def _migrate_net_column(self):
+        """Add and backfill the subnet column used for neighbour inference."""
+        cols = [r[1] for r in self._conn.execute("PRAGMA table_info(abuse_cache)")]
+        if "net" not in cols:
+            self._conn.execute("ALTER TABLE abuse_cache ADD COLUMN net TEXT")
+        rows = self._conn.execute("SELECT ip FROM abuse_cache WHERE net IS NULL").fetchall()
+        self._conn.executemany(
+            "UPDATE abuse_cache SET net = ? WHERE ip = ?",
+            [(_subnet(ip), ip) for (ip,) in rows],
+        )
+        self._conn.execute("CREATE INDEX IF NOT EXISTS abuse_cache_net ON abuse_cache (net)")
+        if rows:
+            logger.info("Backfilled subnet for %d abuse cache entries", len(rows))
+
+    def _infer_from_neighbours(self, ip: str) -> int | None:
+        """Median score of the IP's cached subnet neighbours, or None if they don't justify skipping the lookup."""
+        net = _subnet(ip)
+        if not net:
+            return None
+        cutoff = time.time() - NEIGHBOUR_MAX_AGE_HOURS * 3600
+        with self._lock:
+            scores = sorted(s for (s,) in self._conn.execute(
+                "SELECT confidence_score FROM abuse_cache WHERE net = ? AND ip != ? AND fetched_at >= ?",
+                (net, ip, cutoff),
+            ))
+        high = sum(1 for s in scores if s >= NEIGHBOUR_HIGH_SCORE)
+        if high < NEIGHBOUR_MIN_HIGH or high < NEIGHBOUR_HIGH_RATIO * len(scores):
+            return None
+        score = scores[len(scores) // 2]
+        if net not in self._inferred_nets:
+            self._inferred_nets.add(net)
+            logger.info("AbuseIPDB lookups skipped for %s: %d/%d cached neighbours scored >= %d (using %d)",
+                        net, high, len(scores), NEIGHBOUR_HIGH_SCORE, score)
+        return score
+
+    def _store(self, ip: str, api_data: dict) -> tuple[int, int]:
+        cs = api_data.get("abuseConfidenceScore", 0)
+        tr = api_data.get("totalReports", 0)
+
+        jitter_seconds = random.randint(-6 * 3600, 6 * 3600)
+        fetched_at = time.time() + jitter_seconds
+
+        with self._lock:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO abuse_cache (ip, confidence_score, total_reports, data_json, fetched_at, net) VALUES (?, ?, ?, ?, ?, ?)",
+                (ip, cs, tr, json.dumps(api_data), fetched_at, _subnet(ip)),
+            )
+            self._conn.commit()
+        return cs, tr
 
     def _migrate_json_cache(self):
         """Migrate existing JSON cache to SQLite on first run."""
@@ -146,24 +219,18 @@ class AbuseChecker:
 
             return confidence_score, total_reports
 
-        # Cold Cache Miss: Execute request via safe centralized gatekeeper
+        # Cold Cache Miss: reuse the subnet's score when its neighbours are clearly abusive.
+        # Inferred scores are not cached, so they never count as neighbours themselves.
+        inferred = self._infer_from_neighbours(ip)
+        if inferred is not None:
+            logger.debug("AbuseIPDB lookup skipped for %s, inferred score %d from neighbours", ip, inferred)
+            return inferred, 0
+
+        # Execute request via safe centralized gatekeeper
         api_data = self._execute_api_request(ip)
         if not api_data:
             return 0, 0
-
-        cs = api_data.get("abuseConfidenceScore", 0)
-        tr = api_data.get("totalReports", 0)
-
-        jitter_seconds = random.randint(-6 * 3600, 6 * 3600)
-        fetched_at = time.time() + jitter_seconds
-
-        with self._lock:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO abuse_cache (ip, confidence_score, total_reports, data_json, fetched_at) VALUES (?, ?, ?, ?, ?)",
-                (ip, cs, tr, json.dumps(api_data), fetched_at),
-            )
-            self._conn.commit()
-        return cs, tr
+        return self._store(ip, api_data)
 
     def _refresh_api_async(self, ip: str):
         """Worker executing asynchronous API checks safely via centralized gatekeeper."""
@@ -177,18 +244,7 @@ class AbuseChecker:
             api_data = self._execute_api_request(ip)
             
             if api_data:
-                cs = api_data.get("abuseConfidenceScore", 0)
-                tr = api_data.get("totalReports", 0)
-
-                jitter_seconds = random.randint(-6 * 3600, 6 * 3600)
-                fetched_at = time.time() + jitter_seconds
-
-                with self._lock:
-                    self._conn.execute(
-                        "INSERT OR REPLACE INTO abuse_cache (ip, confidence_score, total_reports, data_json, fetched_at) VALUES (?, ?, ?, ?, ?)",
-                        (ip, cs, tr, json.dumps(api_data), fetched_at),
-                    )
-                    self._conn.commit()
+                cs, _ = self._store(ip, api_data)
                 logger.debug("Asynchronous revalidation complete for %s (Score: %d%%)", ip, cs)
         finally:
             with self._lock:
