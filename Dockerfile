@@ -1,4 +1,4 @@
-FROM python:3.14-slim AS builder
+FROM python:3.15-slim AS builder
 
 WORKDIR /app
 
@@ -11,7 +11,7 @@ COPY src/requirements.txt .
 RUN pip install --no-cache-dir --user -r requirements.txt
 
 # Final minimal execution stage
-FROM python:3.14-slim
+FROM python:3.15-slim
 
 WORKDIR /home/appuser/app
 
